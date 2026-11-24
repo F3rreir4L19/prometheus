@@ -1,0 +1,21 @@
+[package]
+name = "scope-engine"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+domain.workspace = true
+blake3.workspace = true
+idna.workspace = true
+ipnet.workspace = true
+serde.workspace = true
+serde_yaml.workspace = true
+thiserror.workspace = true
+url.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true

@@ -1,0 +1,14 @@
+version: 1
+snapshot:
+  id: lab-v1
+  program_id: lab
+  source: manual_reviewed
+  valid_from: 0
+  expires_at: 4102444800
+  rules:
+    - { id: explicit-exclusion, effect: deny, kind: domain, target: payments.example.com, actions: [http] }
+    - { id: lab-hosts, effect: allow, kind: wildcard, target: "*.example.com", actions: [http] }
+    - { id: lab-network, effect: allow, kind: cidr, target: 192.0.2.0/25, actions: [http] }
+    - { id: lab-ip-deny, effect: deny, kind: ip, target: 192.0.2.1, actions: [http] }
+    - { id: lab-docs, effect: allow, kind: url_prefix, target: https://example.org/docs, actions: [http] }
+    - { id: lab-idna, effect: allow, kind: domain, target: münchen.example, actions: [http] }

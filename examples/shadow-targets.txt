@@ -1,0 +1,17 @@
+# Dataset sintético. " -> " indica um redirect observado, sem executar HTTP.
+ API.Example.COM.
+payments.example.com
+example.com
+https://example.org/docs/page
+https://example.org/docsets
+https://api.example.com/ -> https://elsewhere.example.org/
+https://api.example.com/ -> https://payments.example.com/
+https://api.example.com/ -> https://www.example.com/landing
+192.0.2.0/26
+192.0.2.0/25
+192.0.2.128/25
+192.0.2.2
+::ffff:192.0.2.1
+xn--mnchen-3ya.example
+https://api.example.com/a/../private
+not a target!

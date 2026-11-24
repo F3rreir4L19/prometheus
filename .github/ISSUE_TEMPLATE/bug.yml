@@ -1,0 +1,26 @@
+name: Relato de bug local
+description: Registre uma regressão do Prometheus com fixture sintética e sem segredos.
+body:
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reprodução local
+      description: Informe commit, sistema, comandos e fixture sintética.
+    validations:
+      required: true
+  - type: textarea
+    id: behavior
+    attributes:
+      label: Esperado e observado
+      description: Inclua a decisão e o conteúdo redigido relevante.
+    validations:
+      required: true
+  - type: checkboxes
+    id: invariants
+    attributes:
+      label: Revisão obrigatória
+      options:
+        - label: Revisei o impacto em escopo vigente, DENY/UNKNOWN e redirects.
+          required: true
+        - label: Removi segredos e revisei isolamento, recursos, auditoria e HITL.
+          required: true

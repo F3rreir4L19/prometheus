@@ -1,0 +1,48 @@
+[workspace]
+members = [
+    "crates/domain",
+    "crates/scope-engine",
+    "crates/storage",
+    "crates/runner",
+    "crates/intel",
+    "crates/control-protocol",
+    "crates/telemetry",
+    "apps/prometheus-worker",
+    "apps/prometheus-control",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[workspace.dependencies]
+domain = { path = "crates/domain" }
+scope-engine = { path = "crates/scope-engine" }
+anyhow = "=1.0.98"
+axum = { version = "=0.8.4", default-features = false }
+blake3 = { version = "=1.8.2", features = ["pure", "no_avx2", "no_avx512"] }
+clap = { version = "=4.5.40", features = ["derive"] }
+hmac = "=0.12.1"
+idna = "=1.0.3"
+ipnet = "=2.11.0"
+proptest = "=1.7.0"
+schemars = "=1.0.4"
+serde = { version = "=1.0.219", features = ["derive"] }
+serde_json = "=1.0.140"
+serde_yaml = "=0.9.34"
+sha2 = "=0.10.9"
+sqlx = { version = "=0.8.6", default-features = false, features = ["runtime-tokio", "sqlite", "migrate", "macros"] }
+thiserror = "=2.0.12"
+tokio = { version = "=1.45.1", features = ["macros", "rt"] }
+tower = { version = "=0.5.2", features = ["util"] }
+tracing = "=0.1.41"
+url = "=2.5.4"
+
+[workspace.lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"

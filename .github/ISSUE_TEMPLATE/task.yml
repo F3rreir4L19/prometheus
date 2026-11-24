@@ -1,0 +1,28 @@
+name: Tarefa técnica
+description: Especifique uma alteração pequena com aceite verificável.
+body:
+  - type: textarea
+    id: objective
+    attributes:
+      label: Objetivo e arquivos previstos
+      description: Indique entradas, saída esperada e ADRs afetados.
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Critérios de aceite
+      description: Inclua comandos locais, casos de falha e fixtures sintéticas.
+    validations:
+      required: true
+  - type: checkboxes
+    id: invariants
+    attributes:
+      label: Revisão obrigatória
+      options:
+        - label: Avaliei snapshot vigente, ação, DENY/UNKNOWN e redirects.
+          required: true
+        - label: Avaliei isolamento de IA, redação, limites e ausência de segredos.
+          required: true
+        - label: Avaliei proveniência, auditoria, revisão humana e compatibilidade de build.
+          required: true
