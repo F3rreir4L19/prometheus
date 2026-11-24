@@ -4,7 +4,7 @@ mod target;
 
 use std::collections::HashSet;
 
-use domain::{Action, Decision, Effect, ScopeRule, ScopeSnapshot, ScopeSnapshotId, ScopeSource};
+use domain::{Action, Decision, Effect, ScopeSnapshot, ScopeSnapshotId, ScopeSource};
 use serde::{Deserialize, Serialize};
 use target::{Matcher, Target};
 use thiserror::Error;
@@ -64,18 +64,10 @@ impl Verdict<'_> {
 }
 
 #[derive(Debug)]
-struct CompiledRule {
-    rule: ScopeRule,
-    matcher: Matcher,
-}
-
-#[derive(Debug)]
 pub struct ScopeEngine {
-    snapshot_id: ScopeSnapshotId,
-    valid_from: u64,
-    expires_at: u64,
+    snapshot: ScopeSnapshot,
     source_hash: blake3::Hash,
-    rules: Vec<CompiledRule>,
+    matchers: Vec<Matcher>,
 }
 
 impl ScopeEngine {
@@ -93,32 +85,35 @@ impl ScopeEngine {
             || snapshot.valid_from >= snapshot.expires_at
             || snapshot
                 .supersedes_id
-                .is_some_and(|previous| previous == snapshot.id || !valid_id(&previous.0))
+                .as_ref()
+                .is_some_and(|previous| previous == &snapshot.id || !valid_id(&previous.0))
         {
             return Err(ScopeError::InvalidSnapshot);
         }
 
         let mut ids = HashSet::new();
-        let mut rules = Vec::with_capacity(snapshot.rules.len());
-        for (index, rule) in snapshot.rules.into_iter().enumerate() {
-            if !valid_id(&rule.id.0) || !ids.insert(rule.id.clone()) || rule.actions.is_empty() {
+        let mut matchers = Vec::with_capacity(snapshot.rules.len());
+        for (index, rule) in snapshot.rules.iter().enumerate() {
+            if !valid_id(&rule.id.0) || !ids.insert(&rule.id) || rule.actions.is_empty() {
                 return Err(ScopeError::InvalidRule(index));
             }
             let matcher =
                 Matcher::compile(rule.kind, &rule.target).ok_or(ScopeError::InvalidRule(index))?;
-            rules.push(CompiledRule { rule, matcher });
+            matchers.push(matcher);
         }
         Ok(Self {
-            snapshot_id: snapshot.id,
-            valid_from: snapshot.valid_from,
-            expires_at: snapshot.expires_at,
+            snapshot,
             source_hash: blake3::hash(input),
-            rules,
+            matchers,
         })
     }
 
     pub fn snapshot_id(&self) -> &ScopeSnapshotId {
-        &self.snapshot_id
+        &self.snapshot.id
+    }
+
+    pub fn snapshot(&self) -> &ScopeSnapshot {
+        &self.snapshot
     }
 
     pub fn source_hash(&self) -> blake3::Hash {
@@ -133,14 +128,16 @@ impl ScopeEngine {
         action: Action,
         raw: &str,
     ) -> Verdict<'_> {
-        if job_snapshot != &self.snapshot_id || !(self.valid_from..self.expires_at).contains(&now) {
+        if job_snapshot != self.snapshot_id()
+            || !(self.snapshot.valid_from..self.snapshot.expires_at).contains(&now)
+        {
             return Verdict::new(Decision::Unknown, Reason::InactiveSnapshot, None);
         }
         let Some(target) = Target::parse(raw) else {
             return Verdict::malformed();
         };
         let mut allowed = None;
-        for CompiledRule { rule, matcher } in &self.rules {
+        for (rule, matcher) in self.snapshot.rules.iter().zip(&self.matchers) {
             if rule.actions.contains(&action)
                 && matcher.matches(&target, rule.effect == Effect::Deny)
             {
@@ -176,6 +173,13 @@ impl ScopeEngine {
 
 pub fn canonicalize_target(input: &str) -> Option<String> {
     Target::parse(input).map(|target| target.canonical())
+}
+
+pub fn canonicalize_domain(input: &str) -> Option<String> {
+    match Target::parse(input)? {
+        Target::Domain(name) => Some(name),
+        Target::Url(_) | Target::Network(_) => None,
+    }
 }
 
 fn valid_id(id: &str) -> bool {

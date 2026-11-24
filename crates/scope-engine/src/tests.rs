@@ -1,7 +1,7 @@
 use domain::{Action, Decision, ScopeSnapshotId};
 use proptest::prelude::*;
 
-use crate::{canonicalize_target, Reason, ScopeEngine};
+use crate::{canonicalize_domain, canonicalize_target, Reason, ScopeEngine};
 
 const LAB: &[u8] = include_bytes!("../../../examples/lab-scope.yaml");
 const RULE_ALLOW: &str =
@@ -60,6 +60,37 @@ fn fixture_decisions() {
     assert!(!engine
         .evaluate(engine.snapshot_id(), 1, Action::Dns, "api.example.com")
         .is_allowed());
+}
+
+#[test]
+fn passive_inventory_requires_a_domain_and_passive_authority() {
+    let bytes = include_bytes!("../../../examples/lab-passive-scope.yaml");
+    let engine = ScopeEngine::from_yaml(bytes).expect("reviewed passive fixture");
+    let snapshot = engine.snapshot_id();
+    let allowed = canonicalize_domain("MÜNCHEN.Example.").expect("IDNA domain");
+    assert_eq!(allowed, "xn--mnchen-3ya.example");
+    assert!(engine
+        .evaluate(snapshot, 1, Action::Passive, &allowed)
+        .is_allowed());
+    assert_eq!(
+        engine
+            .evaluate(snapshot, 1, Action::Passive, "payments.example.com")
+            .decision,
+        Decision::Deny
+    );
+    assert_eq!(
+        engine
+            .evaluate(snapshot, 1, Action::Passive, "192.0.2.64")
+            .decision,
+        Decision::Unknown
+    );
+    for input in [
+        "https://api.example.com/",
+        "::ffff:192.0.2.64",
+        "192.0.2.0/25",
+    ] {
+        assert!(canonicalize_domain(input).is_none());
+    }
 }
 
 #[test]

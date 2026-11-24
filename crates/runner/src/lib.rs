@@ -1,4 +1,9 @@
-//! Local resource contracts. M0 handles only recorded fixtures.
+//! Resource contracts and supervised replay of recorded fixtures.
+
+#[cfg(target_os = "linux")]
+mod process;
+#[cfg(target_os = "linux")]
+pub use process::{replay_local_fixture, FixtureManifest, FixtureOutput, FixturePin, ReplayError};
 
 use std::{num::NonZeroUsize, time::Duration};
 

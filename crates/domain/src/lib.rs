@@ -25,6 +25,7 @@ id!(
     ApprovalId,
     AuditEventId,
     JobId,
+    ToolRunId,
 );
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -121,6 +122,67 @@ pub struct Observation {
     pub observed_at: u64,
     pub collector: String,
     pub exact_hash: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DeltaKind {
+    NewAsset,
+    ReactivatedAsset,
+    ScopeChanged,
+    ChangedAsset,
+    AbsentAsset,
+}
+
+impl DeltaKind {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::NewAsset => "new_asset",
+            Self::ReactivatedAsset => "reactivated_asset",
+            Self::ScopeChanged => "scope_changed",
+            Self::ChangedAsset => "changed_asset",
+            Self::AbsentAsset => "absent_asset",
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct DeltaDetected {
+    pub kind: DeltaKind,
+    pub scope_snapshot_id: ScopeSnapshotId,
+    pub asset_id: Option<AssetId>,
+    pub observation_id: Option<ObservationId>,
+    pub occurred_at: u64,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CollectionCompleteness {
+    Complete,
+    Partial,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct DeltaCounts {
+    pub new_assets: u64,
+    pub reactivated_assets: u64,
+    pub scope_changes: u64,
+    pub changed_assets: u64,
+    pub absent_assets: u64,
+}
+
+impl DeltaCounts {
+    pub fn record(&mut self, kind: DeltaKind) {
+        match kind {
+            DeltaKind::NewAsset => self.new_assets += 1,
+            DeltaKind::ReactivatedAsset => self.reactivated_assets += 1,
+            DeltaKind::ScopeChanged => self.scope_changes += 1,
+            DeltaKind::ChangedAsset => self.changed_assets += 1,
+            DeltaKind::AbsentAsset => self.absent_assets += 1,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]

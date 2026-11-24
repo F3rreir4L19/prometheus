@@ -10,10 +10,19 @@ workspace = true
 [dependencies]
 anyhow.workspace = true
 clap.workspace = true
+control-protocol = { path = "../../crates/control-protocol" }
 domain.workspace = true
+intel = { path = "../../crates/intel" }
+reqwest = { version = "=0.12.28", default-features = false, features = ["json", "rustls-tls"] }
 scope-engine.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+storage = { path = "../../crates/storage" }
+tokio = { workspace = true, features = ["time"] }
+url.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+rustix = { version = "=1.1.6", features = ["fs"] }
 
 [dev-dependencies]
 tempfile = "=3.27.0"

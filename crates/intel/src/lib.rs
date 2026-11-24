@@ -1,5 +1,7 @@
 //! Model configuration, schema and deterministic redaction. Provider I/O is deferred.
 
+pub mod passive;
+
 use domain::{AssetId, EvidenceId, ProgramId};
 use hmac::{Hmac, Mac};
 use schemars::JsonSchema;

@@ -1,6 +1,6 @@
 # RFC 0001 · Arquitetura do Prometheus
 
-**Status** Aceita para a fundação M0.  
+**Status** Aceita para a fundação M0.
 **Entrada** [RFC de pesquisa](../research/2026-11-24-deep-research-rfc.md), com precedência das decisões do bootstrap sobre a decomposição sugerida na pesquisa.
 
 O Prometheus registra mudanças de superfície autorizada e organiza evidências para triagem humana. A unidade de autorização é um snapshot por programa. A unidade de prova é uma observação temporal com proveniência. O sistema deriva candidatos e relatórios dessas evidências, mantendo a decisão final com a pessoa operadora.

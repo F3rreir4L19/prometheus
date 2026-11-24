@@ -11,8 +11,11 @@ use domain::{Action, Decision};
 use scope_engine::{ScopeEngine, Verdict};
 use serde::Serialize;
 
+mod control;
+mod passive;
+
 #[derive(Parser)]
-#[command(about = "Offline Prometheus scope audit")]
+#[command(about = "Prometheus scope audit and local asset inventory")]
 struct Cli {
     #[command(subcommand)]
     command: Command,
@@ -29,6 +32,17 @@ enum Command {
         #[arg(long, value_enum)]
         action: CliAction,
     },
+    /// Publish a reviewed YAML revision as the active policy for its program.
+    PublishScope {
+        #[arg(long)]
+        scope: PathBuf,
+        #[arg(long)]
+        db: PathBuf,
+    },
+    /// Filter a local inventory and calculate deltas for the active snapshot.
+    PassiveSync(passive::SyncArgs),
+    /// Send periodic signed heartbeats to the control plane.
+    Heartbeat(control::HeartbeatArgs),
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -73,7 +87,8 @@ struct Summary {
     unknown: usize,
 }
 
-fn main() -> Result<()> {
+#[tokio::main(flavor = "current_thread")]
+async fn main() -> Result<()> {
     let Cli { command } = Cli::parse();
     match command {
         Command::ShadowMode {
@@ -81,6 +96,9 @@ fn main() -> Result<()> {
             targets,
             action,
         } => shadow(&scope, &targets, action.into()),
+        Command::PublishScope { scope, db } => passive::publish_scope(&scope, &db).await,
+        Command::PassiveSync(args) => passive::sync(args).await,
+        Command::Heartbeat(args) => control::heartbeat(args).await,
     }
 }
 

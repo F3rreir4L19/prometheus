@@ -1,6 +1,12 @@
-//! In-process health route for the future control plane.
+//! Read-only worker health and aggregate notifications.
+
+mod control;
+mod notifications;
 
 use axum::{http::StatusCode, routing::get, Router};
+
+pub use control::{ControlPlane, ControlSettingsError};
+pub use notifications::{drain_notifications, Notice, NoticeReceivers, Telegram};
 
 pub fn health_router() -> Router {
     Router::new().route("/healthz", get(|| async { StatusCode::OK }))
