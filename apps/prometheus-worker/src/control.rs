@@ -32,6 +32,11 @@ pub struct ControlSender {
 }
 
 impl ControlSender {
+    #[cfg(target_os = "linux")]
+    pub(crate) fn is_local(&self) -> bool {
+        self.endpoint.scheme() == "http"
+    }
+
     pub fn new(origin: &str) -> Result<Self> {
         let endpoint = event_endpoint(origin)?;
         let worker_id =

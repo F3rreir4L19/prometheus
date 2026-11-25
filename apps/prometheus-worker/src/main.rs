@@ -39,7 +39,7 @@ enum Command {
         #[arg(long)]
         db: PathBuf,
     },
-    /// Filter a local inventory and calculate deltas for the active snapshot.
+    /// Synchronize a local or passive provider inventory and calculate deltas.
     PassiveSync(passive::SyncArgs),
     /// Send periodic signed heartbeats to the control plane.
     Heartbeat(control::HeartbeatArgs),

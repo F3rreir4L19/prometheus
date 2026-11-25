@@ -26,7 +26,9 @@ const MAX_FIXTURE_BYTES: usize = 4 * 1024 * 1024;
 const MAX_QUEUE_CAPACITY: usize = 64;
 const MAX_TIMEOUT: Duration = Duration::from_secs(300);
 const PIPE_CHUNK_BYTES: usize = 4096;
-static REPLAY_SLOT: Semaphore = Semaphore::const_new(1);
+pub(crate) static HEAVY_PROCESS_SLOT: Semaphore = Semaphore::const_new(1);
+#[cfg(test)]
+pub(crate) static PROCESS_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 /// An operator-reviewed binary version and digest. Both fixed helpers require a pin.
 pub struct FixturePin<'a> {
@@ -78,7 +80,7 @@ pub async fn replay_local_fixture(
     limits: &ResourceLimits,
 ) -> Result<FixtureOutput, ReplayError> {
     validate_limits(input, limits)?;
-    let _slot = REPLAY_SLOT
+    let _slot = HEAVY_PROCESS_SLOT
         .try_acquire()
         .map_err(|_| ReplayError::Contained(Containment::Backpressure))?;
     let directory = tempfile::Builder::new()
@@ -88,17 +90,32 @@ pub async fn replay_local_fixture(
     let directory_path = directory.path().canonicalize()?;
     let copy = directory_path.join("cat");
     let limiter = directory_path.join("prlimit");
-    stage_helper(Path::new(COPY_BINARY), &copy, &manifest.copy)?;
-    stage_helper(Path::new(LIMIT_BINARY), &limiter, &manifest.limiter)?;
+    stage_binary(
+        Path::new(COPY_BINARY),
+        &copy,
+        &manifest.copy,
+        MAX_BINARY_BYTES,
+    )?;
+    stage_binary(
+        Path::new(LIMIT_BINARY),
+        &limiter,
+        &manifest.limiter,
+        MAX_BINARY_BYTES,
+    )?;
 
     // prlimit replaces itself with cat in the same process. The 256 MiB address-space budget
     // also applies to cat. Closing core dumps and regular-file output keeps fixture bytes in pipes.
     let mut command = Command::new(limiter);
     command
+        .env_clear()
         .args(["--as=268435456", "--core=0", "--fsize=0", "--"])
         .arg(copy)
         .current_dir(directory_path);
-    supervise(command, input, limits).await
+    let (output, status) = supervise(command, input, limits).await?;
+    if !status.success() {
+        return Err(ReplayError::UnsuccessfulExit);
+    }
+    Ok(output)
 }
 
 fn validate_limits(input: &[u8], limits: &ResourceLimits) -> Result<(), ReplayError> {
@@ -120,7 +137,12 @@ fn validate_limits(input: &[u8], limits: &ResourceLimits) -> Result<(), ReplayEr
 
 /// Hash exactly the bytes written to a private, read-only executable. A replaced source path
 /// cannot change the staged binary after verification.
-fn stage_helper(source: &Path, staged: &Path, pin: &FixturePin<'_>) -> Result<(), ReplayError> {
+pub(crate) fn stage_binary(
+    source: &Path,
+    staged: &Path,
+    pin: &FixturePin<'_>,
+    max_binary_bytes: u64,
+) -> Result<(), ReplayError> {
     if pin.version.is_empty()
         || pin.version.len() > 64
         || !pin
@@ -142,11 +164,11 @@ fn stage_helper(source: &Path, staged: &Path, pin: &FixturePin<'_>) -> Result<()
     let mut header = [0; 4];
     if !metadata.is_file()
         || metadata.len() < header.len() as u64
-        || metadata.len() > MAX_BINARY_BYTES
+        || metadata.len() > max_binary_bytes
     {
         return Err(ReplayError::InvalidManifest);
     }
-    let mut source = source.take(MAX_BINARY_BYTES + 1);
+    let mut source = source.take(max_binary_bytes + 1);
     source.read_exact(&mut header)?;
     if &header != b"\x7fELF" {
         return Err(ReplayError::InvalidManifest);
@@ -167,7 +189,7 @@ fn stage_helper(source: &Path, staged: &Path, pin: &FixturePin<'_>) -> Result<()
             break;
         }
         length += read as u64;
-        if length > MAX_BINARY_BYTES {
+        if length > max_binary_bytes {
             return Err(ReplayError::InvalidManifest);
         }
         digest.update(&buffer[..read]);
@@ -181,14 +203,13 @@ fn stage_helper(source: &Path, staged: &Path, pin: &FixturePin<'_>) -> Result<()
     Ok(())
 }
 
-async fn supervise(
+pub(crate) async fn supervise(
     mut command: Command,
     input: &[u8],
     limits: &ResourceLimits,
-) -> Result<FixtureOutput, ReplayError> {
+) -> Result<(FixtureOutput, ExitStatus), ReplayError> {
     let wall_deadline = Instant::now() + limits.wall_timeout;
     let mut child = command
-        .env_clear()
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -214,8 +235,8 @@ async fn exchange(
     child: &mut Child,
     input: &[u8],
     limits: &ResourceLimits,
-) -> Result<FixtureOutput, ReplayError> {
-    let unavailable = || io::Error::other("fixture helper pipe unavailable");
+) -> Result<(FixtureOutput, ExitStatus), ReplayError> {
+    let unavailable = || io::Error::other("supervised process pipe unavailable");
     let stdin = child.stdin.take().ok_or_else(unavailable)?;
     let stdout = child.stdout.take().ok_or_else(unavailable)?;
     let stderr = child.stderr.take().ok_or_else(unavailable)?;
@@ -230,13 +251,13 @@ async fn exchange(
         feed(stdin, input),
         collect(child, receive, limits.idle_timeout)
     )?;
-    if !status.success() {
-        return Err(ReplayError::UnsuccessfulExit);
-    }
-    Ok(FixtureOutput {
-        stdout,
-        stderr_bytes,
-    })
+    Ok((
+        FixtureOutput {
+            stdout,
+            stderr_bytes,
+        },
+        status,
+    ))
 }
 
 async fn feed(mut pipe: impl AsyncWrite + Unpin, input: &[u8]) -> Result<(), ReplayError> {

@@ -1,9 +1,26 @@
 //! Resource contracts and supervised replay of recorded fixtures.
 
+mod crtsh;
+mod passive;
+mod rate;
+pub use crtsh::CrtshCollector;
+pub use passive::{
+    CollectedCandidates, CollectionError, CollectionGate, PassiveCollector, PassiveRequest,
+    SubfinderPin, ToolManifest, SUBFINDER_CONTRACT_VERSION,
+};
+pub use rate::PassiveRateLimiter;
+
 #[cfg(target_os = "linux")]
 mod process;
 #[cfg(target_os = "linux")]
+mod subfinder;
+#[cfg(target_os = "linux")]
 pub use process::{replay_local_fixture, FixtureManifest, FixtureOutput, FixturePin, ReplayError};
+#[cfg(target_os = "linux")]
+pub use subfinder::SubfinderCollector;
+
+#[cfg(test)]
+mod test_support;
 
 use std::{num::NonZeroUsize, time::Duration};
 

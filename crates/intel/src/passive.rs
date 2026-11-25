@@ -1,4 +1,7 @@
-//! Offline domain selection. Discovery hints carry no inventory completeness or scope authority.
+//! Passive domain selection. Discovery hints carry no inventory completeness or scope authority.
+
+mod collectors;
+pub use collectors::{parse_crtsh, parse_subfinder, ProviderCandidates, MAX_PROVIDER_BYTES};
 
 use std::collections::BTreeSet;
 
@@ -21,6 +24,8 @@ pub enum PassiveInputError {
     RecordLimit,
     #[error("invalid discovery index JSON")]
     InvalidIndex,
+    #[error("invalid passive provider JSON")]
+    InvalidProvider,
     #[error("passive input requires the current valid snapshot")]
     InactiveSnapshot,
 }
@@ -63,6 +68,29 @@ pub fn filter_inventory(
     }
     let mut selector = Selector::new(engine, active_snapshot, now)?;
     selector.read_lines(input, MAX_INVENTORY_RECORDS)?;
+    Ok(InventorySelection {
+        domains: selector.domains.into_iter().collect(),
+        counts: selector.counts,
+    })
+}
+
+/// Re-evaluate every well-formed candidate against the current passive policy. The parser's
+/// count preserves malformed input without passing raw provider output to storage or logging.
+pub fn filter_live_candidates(
+    candidates: &[String],
+    malformed: usize,
+    engine: &ScopeEngine,
+    active_snapshot: &ScopeSnapshotId,
+    now: u64,
+) -> Result<InventorySelection, PassiveInputError> {
+    if candidates.len() > MAX_INVENTORY_RECORDS {
+        return Err(PassiveInputError::RecordLimit);
+    }
+    let mut selector = Selector::new(engine, active_snapshot, now)?;
+    selector.counts.malformed = malformed;
+    for candidate in candidates {
+        selector.consider(candidate);
+    }
     Ok(InventorySelection {
         domains: selector.domains.into_iter().collect(),
         counts: selector.counts,

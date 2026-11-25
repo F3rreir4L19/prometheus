@@ -1,9 +1,17 @@
 //! SQLite metadata and append-only audit. Database files must be on a local filesystem.
 
 mod passive;
+mod passive_admission;
 mod publication;
 
-pub use passive::{record_passive_run, PassiveRunInput, PassiveRunResult, MAX_INVENTORY_DOMAINS};
+pub use passive::{
+    last_collector_observed_at, record_collector_run, record_passive_run, replay_collector_run,
+    LiveRunAudit, LiveRunProvenance, LiveRunReplay, LiveTool, PassiveRunInput, PassiveRunResult,
+    MAX_INVENTORY_DOMAINS,
+};
+pub use passive_admission::{
+    admit_passive_collection, defer_passive_provider, finish_passive_dispatch, PassiveRateTime,
+};
 pub use publication::publish_reviewed_scope;
 
 use std::{
@@ -53,6 +61,10 @@ pub enum StorageError {
     InventoryLimit,
     #[error("passive inventory exceeds the per-run delta limit")]
     DeltaLimit,
+    #[error("passive provider admission is rate limited")]
+    PassiveRateLimited,
+    #[error("invalid live collector provenance")]
+    InvalidCollector,
     #[error("could not encode or decode storage metadata")]
     Metadata,
 }
@@ -65,6 +77,12 @@ impl From<serde_json::Error> for StorageError {
 
 pub fn unix_time_seconds() -> Result<u64, StorageError> {
     Ok(SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs())
+}
+
+pub fn unix_time_millis() -> Result<u64, StorageError> {
+    Ok(u64::try_from(
+        SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis(),
+    )?)
 }
 
 fn stable_id(label: &str, fields: &[&str]) -> String {

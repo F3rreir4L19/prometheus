@@ -111,3 +111,94 @@ fn limits_and_snapshot_mismatch_fail_closed() -> Result<(), Box<dyn std::error::
     ));
     Ok(())
 }
+
+#[test]
+fn crtsh_uses_canonical_san_names_and_checks_every_candidate(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let engine = ScopeEngine::from_yaml(POLICY)?;
+    let input = r#"[
+        {"name_value":"*.WWW.example.com\nwww.example.com.\nmünchen.example", "common_name":"ignored.example.com"},
+        {"name_value":"private.example.com\nexample.com\nhttp.example.org\nwww.example.com;malicious"},
+        {"name_value":13},
+        {"common_name":"malicious.example.com"}
+    ]"#;
+    let batch = parse_crtsh(input.as_bytes())?;
+    let result = filter_live_candidates(
+        &batch.candidates,
+        batch.malformed,
+        &engine,
+        engine.snapshot_id(),
+        12,
+    )?;
+    assert_eq!(
+        result.domains,
+        ["www.example.com", "xn--mnchen-3ya.example"]
+    );
+    assert_eq!(
+        result.counts,
+        SelectionCounts {
+            allowed: 2,
+            denied: 1,
+            unknown: 2,
+            duplicates: 1,
+            malformed: 3,
+        }
+    );
+    assert!(matches!(
+        parse_crtsh(br#"[{"name_value":"example.com"}"#),
+        Err(PassiveInputError::InvalidProvider)
+    ));
+    assert!(matches!(
+        parse_crtsh(b"[] []"),
+        Err(PassiveInputError::InvalidProvider)
+    ));
+    Ok(())
+}
+
+#[test]
+fn subfinder_rejects_oversized_records_and_treats_json_fields_as_data(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let engine = ScopeEngine::from_yaml(POLICY)?;
+    let mut input = br#"{"host":"wide.example.com","metadata":""#.to_vec();
+    input.extend(std::iter::repeat_n(b'x', 10_000));
+    input.extend_from_slice(b"\"}\n\xff\n");
+    input.extend_from_slice(
+        br#"{"host":"www.example.com","command":"private.example.com"}
+{"host":"$(printf should-not-be-run)"}
+{"host":"www.example.com\nprivate.example.com"}
+{"host":"outside.invalid"}
+{"host":"private.example.com"}
+{"host":"*.wild.example.com"}
+{"source":"unexpected.example.com"}"#,
+    );
+    let batch = parse_subfinder(&input)?;
+    let result = filter_live_candidates(
+        &batch.candidates,
+        batch.malformed,
+        &engine,
+        engine.snapshot_id(),
+        12,
+    )?;
+    assert_eq!(result.domains, ["www.example.com"]);
+    assert_eq!(
+        result.counts,
+        SelectionCounts {
+            allowed: 1,
+            denied: 1,
+            unknown: 1,
+            duplicates: 0,
+            malformed: 6,
+        }
+    );
+    assert!(matches!(
+        filter_live_candidates(
+            &batch.candidates,
+            batch.malformed,
+            &engine,
+            engine.snapshot_id(),
+            20
+        ),
+        Err(PassiveInputError::InactiveSnapshot)
+    ));
+    Ok(())
+}

@@ -14,6 +14,7 @@ fn limits() -> Result<ResourceLimits, Box<dyn std::error::Error>> {
 
 #[tokio::test]
 async fn pinned_local_replay_applies_the_stdout_budget() -> Result<(), Box<dyn std::error::Error>> {
+    let _test = PROCESS_TEST_LOCK.lock().await;
     let copy = Sha256::digest(fs::read(COPY_BINARY)?).into();
     let limiter = Sha256::digest(fs::read(LIMIT_BINARY)?).into();
     let mut manifest = FixtureManifest {
@@ -29,7 +30,7 @@ async fn pinned_local_replay_applies_the_stdout_budget() -> Result<(), Box<dyn s
     let input = b"test.example.com\n".repeat(470);
     let mut limits = limits()?;
 
-    let occupied = REPLAY_SLOT.try_acquire()?;
+    let occupied = HEAVY_PROCESS_SLOT.try_acquire()?;
     assert!(matches!(
         replay_local_fixture(&manifest, &input, &limits).await,
         Err(ReplayError::Contained(Containment::Backpressure))
@@ -99,13 +100,14 @@ fn an_executable_script_is_rejected_even_with_a_matching_digest(
     let script = b"#!/bin/sh\nexit 0\n";
     fs::write(&source, script)?;
     assert!(matches!(
-        stage_helper(
+        stage_binary(
             &source,
             &staged,
             &FixturePin {
                 version: "fixture",
                 sha256: Sha256::digest(script).into()
-            }
+            },
+            MAX_BINARY_BYTES
         ),
         Err(ReplayError::InvalidManifest)
     ));
@@ -124,7 +126,7 @@ fn opening_a_fifo_does_not_wait_for_a_writer() -> Result<(), Box<dyn std::error:
         sha256: [0; 32],
     };
     assert!(matches!(
-        stage_helper(&source, &staged, &pin),
+        stage_binary(&source, &staged, &pin, MAX_BINARY_BYTES),
         Err(ReplayError::InvalidManifest)
     ));
     assert!(!staged.exists());

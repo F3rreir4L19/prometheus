@@ -1,5 +1,7 @@
 //! Shared identifiers and state. Times are Unix seconds in UTC.
 
+use std::num::NonZeroU32;
+
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -74,7 +76,40 @@ pub struct ScopeSnapshot {
     pub valid_from: u64,
     pub expires_at: u64,
     pub supersedes_id: Option<ScopeSnapshotId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub passive_live: Option<PassiveRatePolicy>,
     pub rules: Vec<ScopeRule>,
+}
+
+/// Reviewed ceilings for new collector invocations. Rates have a burst of one.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct PassiveRatePolicy {
+    pub program_per_minute: NonZeroU32,
+    pub action_per_minute: NonZeroU32,
+    pub host_per_minute: NonZeroU32,
+    pub provider_per_minute: NonZeroU32,
+}
+
+pub const PASSIVE_GLOBAL_PER_MINUTE: u32 = 60;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PassiveSource {
+    Fixture,
+    Crtsh,
+    CrtshLoopback,
+    Subfinder,
+}
+
+impl PassiveSource {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Fixture => "local_inventory",
+            Self::Crtsh => "crtsh",
+            Self::CrtshLoopback => "crtsh_loopback",
+            Self::Subfinder => "subfinder",
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]

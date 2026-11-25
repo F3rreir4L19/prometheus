@@ -1,0 +1,199 @@
+--- a/cmd/subfinder/main.go
++++ b/cmd/subfinder/main.go
+@@ -2,22 +2,130 @@
+
+ import (
+-	"github.com/projectdiscovery/subfinder/v2/pkg/runner"
+-	// Attempts to increase the OS file descriptors - Fail silently
+-	_ "github.com/projectdiscovery/fdmax/autofdmax"
+-	"github.com/projectdiscovery/gologger"
++	"context"
++	"crypto/tls"
++	"encoding/json"
++	"errors"
++	"io"
++	"net"
++	"net/http"
++	"net/url"
++	"os"
++	"regexp"
++	"slices"
++	"sync/atomic"
++	"time"
++
++	"github.com/projectdiscovery/subfinder/v2/pkg/subscraping"
++	"github.com/projectdiscovery/subfinder/v2/pkg/subscraping/sources/hackertarget"
+ )
+
++const (
++	provider     = "hackertarget"
++	providerHost = "api.hackertarget.com"
++	maxBody      = 4 * 1024 * 1024
++)
++
++var domainName = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)+$`)
++
+ func main() {
+-	// Parse the command line flags and read config files
+-	options := runner.ParseOptions()
++	os.Exit(run(os.Args[1:], os.Stdout, &http.Transport{
++		TLSClientConfig:        &tls.Config{MinVersion: tls.VersionTLS12},
++		DialContext:            (&net.Dialer{Timeout: 5 * time.Second}).DialContext,
++		TLSHandshakeTimeout:    5 * time.Second,
++		ResponseHeaderTimeout:  10 * time.Second,
++		MaxResponseHeaderBytes: 64 * 1024,
++		DisableCompression:     true,
++		DisableKeepAlives:      true,
++	}))
++}
+
+-	newRunner, err := runner.NewRunner(options)
++func run(args []string, output io.Writer, transport http.RoundTripper) int {
++	flags := []string{"-silent", "-oJ", "-duc", "-s", provider, "-rsr", "4194304", "-t", "1"}
++	if len(args) != len(flags)+2 || args[0] != "-d" || !slices.Equal(args[2:], flags) ||
++		len(args[1]) > 253 || !domainName.MatchString(args[1]) {
++		return 1
++	}
++	domain := args[1]
++	extractor, err := subscraping.NewSubdomainExtractor(domain)
+ 	if err != nil {
+-		gologger.Fatal().Msgf("Could not create runner: %s\n", err)
++		return 1
+ 	}
+
+-	err = newRunner.RunEnumeration()
++	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
++	defer cancel()
++	ctx = context.WithValue(ctx, subscraping.CtxSourceArg, provider)
++	client := &http.Client{
++		Transport: &oneQuery{
++			transport: transport,
++			uri:       "/hostsearch/?" + url.Values{"q": {domain}}.Encode(),
++		},
++		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
++	}
++	session := &subscraping.Session{
++		Client:              client,
++		Extractor:           extractor,
++		RequestLimiter:      parentAdmission{},
++		MaxResponseBodySize: maxBody,
++	}
++	source := &hackertarget.Source{}
++	encoder := json.NewEncoder(output)
++	for result := range source.Run(ctx, domain, session) {
++		if result.Type == subscraping.Error {
++			var status providerStatus
++			if errors.As(result.Error, &status) {
++				switch int(status) {
++				case http.StatusTooManyRequests:
++					return 29
++				case http.StatusServiceUnavailable:
++					return 53
++				}
++			}
++			return 1
++		}
++		if err := encoder.Encode(struct {
++			Host   string `json:"host"`
++			Input  string `json:"input"`
++			Source string `json:"source"`
++		}{result.Value, domain, provider}); err != nil {
++			return 1
++		}
++	}
++	if ctx.Err() != nil {
++		return 1
++	}
++	return 0
++}
++
++// The worker admits the process under its durable rate policy. The transport below
++// binds that admission to at most one HTTPS request to the reviewed endpoint.
++type parentAdmission struct{}
++
++func (parentAdmission) Wait(ctx context.Context, _ string) error { return ctx.Err() }
++
++type oneQuery struct {
++	transport http.RoundTripper
++	uri       string
++	sent      atomic.Bool
++}
++
++type providerStatus int
++
++func (providerStatus) Error() string { return "unexpected passive provider status" }
++
++func (gate *oneQuery) RoundTrip(request *http.Request) (*http.Response, error) {
++	if request.Method != http.MethodGet || request.URL.Scheme != "https" ||
++		request.URL.Host != providerHost || request.Host != providerHost ||
++		request.URL.User != nil || request.URL.RequestURI() != gate.uri ||
++		request.Body != nil || gate.sent.Swap(true) {
++		return nil, errors.New("passive provider request outside the reviewed contract")
++	}
++	response, err := gate.transport.RoundTrip(request)
+ 	if err != nil {
+-		gologger.Fatal().Msgf("Could not run enumeration: %s\n", err)
++		return nil, err
+ 	}
++	if response.StatusCode != http.StatusOK || response.ContentLength > maxBody {
++		response.Body.Close()
++		return nil, providerStatus(response.StatusCode)
++	}
++	return response, nil
+ }
+--- /dev/null
++++ b/cmd/subfinder/prometheus_passive_test.go
+@@ -0,0 +1,53 @@
++package main
++
++import (
++	"bytes"
++	"io"
++	"net/http"
++	"strings"
++	"testing"
++)
++
++type responseTransport func(*http.Request) (*http.Response, error)
++
++func (f responseTransport) RoundTrip(request *http.Request) (*http.Response, error) {
++	return f(request)
++}
++
++func TestPassiveProfile(t *testing.T) {
++	for _, tc := range []struct {
++		status, exit int
++	}{
++		{200, 0}, {302, 1}, {429, 29}, {503, 53},
++	} {
++		args := []string{"-d", "example.test", "-silent", "-oJ", "-duc",
++			"-s", "hackertarget", "-rsr", "4194304", "-t", "1"}
++		var output bytes.Buffer
++		calls := 0
++		transport := responseTransport(func(request *http.Request) (*http.Response, error) {
++			calls++
++			if got := request.URL.String(); got != "https://api.hackertarget.com/hostsearch/?q=example.test" {
++				t.Errorf("unexpected request %s", got)
++			}
++			return &http.Response{
++				StatusCode: tc.status,
++				Header:     http.Header{"Location": {"https://outside.example.test/"}},
++				Body:       io.NopCloser(strings.NewReader("www.example.test,192.0.2.1\n")),
++			}, nil
++		})
++		if exit := run(args, &output, transport); exit != tc.exit || calls != 1 {
++			t.Fatalf("status %d: exit %d, requests %d", tc.status, exit, calls)
++		}
++		if tc.exit == 0 && !strings.Contains(output.String(), `"host":"www.example.test"`) {
++			t.Fatalf("expected JSONL hostname: %q", output.String())
++		}
++		if tc.exit != 0 && output.Len() != 0 {
++			t.Fatal("non-successful response supplied candidate output")
++		}
++
++		args[1] = "example.test&apikey=value"
++		if exit := run(args, io.Discard, transport); exit != 1 || calls != 1 {
++			t.Fatal("malformed seed reached the provider")
++		}
++	}
++}

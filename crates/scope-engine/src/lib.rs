@@ -4,7 +4,7 @@ mod target;
 
 use std::collections::HashSet;
 
-use domain::{Action, Decision, Effect, ScopeSnapshot, ScopeSnapshotId, ScopeSource};
+use domain::{Action, Decision, Effect, ScopeSnapshot, ScopeSnapshotId, ScopeSource, TargetKind};
 use serde::{Deserialize, Serialize};
 use target::{Matcher, Target};
 use thiserror::Error;
@@ -118,6 +118,31 @@ impl ScopeEngine {
 
     pub fn source_hash(&self) -> blake3::Hash {
         self.source_hash
+    }
+
+    /// Only an explicit passive domain rule can authorize sending a seed to a provider.
+    pub fn is_passive_collection_seed(
+        &self,
+        snapshot: &ScopeSnapshotId,
+        now: u64,
+        seed: &str,
+    ) -> bool {
+        seed.contains('.')
+            && self.snapshot.passive_live.is_some()
+            && self
+                .evaluate(snapshot, now, Action::Passive, seed)
+                .is_allowed()
+            && self
+                .snapshot
+                .rules
+                .iter()
+                .zip(&self.matchers)
+                .any(|(rule, matcher)| {
+                    rule.effect == Effect::Allow
+                        && rule.kind == TargetKind::Domain
+                        && rule.actions.contains(&Action::Passive)
+                        && matches!(matcher, Matcher::Domain(domain) if domain == seed)
+                })
     }
 
     /// The caller supplies the job snapshot ID and loads this engine from the active revision.

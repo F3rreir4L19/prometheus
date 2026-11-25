@@ -1,9 +1,11 @@
 use std::collections::BTreeSet;
 
 use domain::{
-    Action, AssetId, CollectionCompleteness, DeltaDetected, DeltaKind, ObservationId, ToolRunId,
+    Action, AssetId, CollectionCompleteness, DeltaDetected, DeltaKind, ObservationId,
+    PassiveSource, ToolRunId,
 };
 use scope_engine::{canonicalize_domain, ScopeEngine};
+use serde::{Deserialize, Serialize};
 use sqlx::{SqliteConnection, SqlitePool};
 
 use crate::{
@@ -13,11 +15,16 @@ use crate::{
 
 pub const MAX_INVENTORY_DOMAINS: usize = 10_000;
 const MAX_RUN_DELTAS: usize = 20_000;
-const INVENTORY_COLLECTOR: &str = "local_inventory";
 const INVENTORY_VERSION: &str = "1";
 // SHA-256 of the identity of the built-in inventory reader contract, `prometheus:local-inventory:v1`.
 const INVENTORY_CONTRACT_SHA256: &str =
     "2124136efdc206bc4ec931fcfa9a95c13f8f75070de7a6941a6b54f51489fdbe";
+// SHA-256 of the built-in CT reader identity, `prometheus:crtsh:v1`.
+const CRTSH_CONTRACT_SHA256: &str =
+    "5b8678a3ea0cb89dbc32ea4ad1288a18fe3a273974601de813c6e275fc526030";
+// SHA-256 of the local test reader identity, `prometheus:crtsh-loopback:v1`.
+const CRTSH_LOOPBACK_CONTRACT_SHA256: &str =
+    "ee5cb53c54b5489940d154bdcfb5192556f08ff9a903fe105e72ed213701d1e2";
 
 #[derive(Clone, Copy)]
 pub struct PassiveRunInput<'a> {
@@ -34,6 +41,99 @@ pub struct PassiveRunResult {
     pub replayed: bool,
 }
 
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+pub struct LiveRunAudit {
+    pub denied: usize,
+    pub unknown: usize,
+    pub malformed: usize,
+    pub duplicates: usize,
+    pub failed_collections: usize,
+}
+
+#[derive(Clone, Copy)]
+pub enum LiveTool<'a> {
+    Crtsh,
+    CrtshLoopback,
+    Subfinder { version: &'a str, sha256: &'a str },
+}
+
+impl LiveTool<'_> {
+    pub(crate) fn source(self) -> PassiveSource {
+        match self {
+            Self::Crtsh => PassiveSource::Crtsh,
+            Self::CrtshLoopback => PassiveSource::CrtshLoopback,
+            Self::Subfinder { .. } => PassiveSource::Subfinder,
+        }
+    }
+
+    pub(crate) fn validate(self) -> Result<(), StorageError> {
+        if let Self::Subfinder { version, sha256 } = self {
+            if version.is_empty()
+                || version.len() > 64
+                || !version
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || b"._-+".contains(&byte))
+                || sha256.len() != 64
+                || !sha256
+                    .bytes()
+                    .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+            {
+                return Err(StorageError::InvalidCollector);
+            }
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Copy)]
+pub struct LiveRunProvenance<'a> {
+    pub tool: LiveTool<'a>,
+    pub started_at: u64,
+    pub audit: LiveRunAudit,
+}
+
+pub struct LiveRunReplay {
+    pub result: PassiveRunResult,
+    pub audit: LiveRunAudit,
+    pub present_count: usize,
+}
+
+pub(crate) fn validate_run_key(run_key: &str) -> Result<(), StorageError> {
+    if run_key.is_empty()
+        || run_key.len() > 128
+        || !run_key
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"-_".contains(&byte))
+    {
+        return Err(StorageError::InvalidRunKey);
+    }
+    Ok(())
+}
+
+pub(crate) fn run_id(engine: &ScopeEngine, collector: &str, run_key: &str) -> String {
+    stable_id(
+        "tool-run",
+        &[&engine.snapshot().program_id.0, collector, run_key],
+    )
+}
+
+pub(crate) async fn ensure_published_head(
+    connection: &mut SqliteConnection,
+    engine: &ScopeEngine,
+    now: u64,
+) -> Result<(), StorageError> {
+    let snapshot = engine.snapshot();
+    if !(snapshot.valid_from..snapshot.expires_at).contains(&now) {
+        return Err(StorageError::InactiveScope);
+    }
+    let digest = engine.source_hash().to_hex();
+    load_published_head(connection, &snapshot.program_id.0)
+        .await?
+        .filter(|head| head.id == snapshot.id.0 && head.source_hash == digest.as_str())
+        .ok_or(StorageError::InactiveScope)?;
+    Ok(())
+}
+
 /// Revalidate a normalized local inventory and commit it against the same published head.
 /// An exact retry returns the original deltas. Collection time must increase per program.
 pub async fn record_passive_run(
@@ -42,17 +142,118 @@ pub async fn record_passive_run(
     input: PassiveRunInput<'_>,
     clock: impl Fn() -> Result<u64, StorageError>,
 ) -> Result<PassiveRunResult, StorageError> {
+    write_passive_run(pool, engine, input, None, clock).await
+}
+
+/// Persist only affirmative observations from a passive provider. The current head, scope digest,
+/// and every hostname are revalidated under the SQLite write lock.
+pub async fn record_collector_run(
+    pool: &SqlitePool,
+    engine: &ScopeEngine,
+    input: PassiveRunInput<'_>,
+    provenance: LiveRunProvenance<'_>,
+    clock: impl Fn() -> Result<u64, StorageError>,
+) -> Result<PassiveRunResult, StorageError> {
+    if input.completeness != CollectionCompleteness::Partial
+        || engine.snapshot().passive_live.is_none()
+    {
+        return Err(StorageError::InvalidCollector);
+    }
+    provenance.tool.validate()?;
+    write_passive_run(pool, engine, input, Some(provenance), clock).await
+}
+
+/// A live run key identifies a capture. Reusing it recovers the original result without dispatch.
+pub async fn replay_collector_run(
+    pool: &SqlitePool,
+    engine: &ScopeEngine,
+    source: PassiveSource,
+    run_key: &str,
+    clock: impl Fn() -> Result<u64, StorageError>,
+) -> Result<Option<LiveRunReplay>, StorageError> {
+    if source == PassiveSource::Fixture || engine.snapshot().passive_live.is_none() {
+        return Err(StorageError::InvalidCollector);
+    }
+    validate_run_key(run_key)?;
+    let id = run_id(engine, source.as_str(), run_key);
+    let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
+    ensure_published_head(&mut tx, engine, clock()?).await?;
+    let row: Option<(String, String, String)> = sqlx::query_as(
+        "SELECT r.scope_snapshot_id, r.deltas_json, t.exit_metadata_json FROM passive_runs r
+         JOIN tool_runs t ON t.id = r.id WHERE r.id = ?",
+    )
+    .bind(&id)
+    .fetch_optional(&mut *tx)
+    .await?;
+    let Some((snapshot_id, deltas, metadata)) = row else {
+        tx.commit().await?;
+        return Ok(None);
+    };
+    if snapshot_id != engine.snapshot_id().0 {
+        return Err(StorageError::RunCollision);
+    }
+    #[derive(Deserialize)]
+    struct Metadata {
+        present_count: usize,
+        audit: LiveRunAudit,
+    }
+    let metadata: Metadata = serde_json::from_str(&metadata)?;
+    let deltas = serde_json::from_str(&deltas)?;
+    ensure_published_head(&mut tx, engine, clock()?).await?;
+    tx.commit().await?;
+    Ok(Some(LiveRunReplay {
+        result: PassiveRunResult {
+            run_id: ToolRunId(id),
+            deltas,
+            replayed: true,
+        },
+        audit: metadata.audit,
+        present_count: metadata.present_count,
+    }))
+}
+
+pub async fn last_collector_observed_at(
+    pool: &SqlitePool,
+    engine: &ScopeEngine,
+    source: PassiveSource,
+    clock: impl Fn() -> Result<u64, StorageError>,
+) -> Result<Option<u64>, StorageError> {
+    if source == PassiveSource::Fixture || engine.snapshot().passive_live.is_none() {
+        return Err(StorageError::InvalidCollector);
+    }
+    let mut tx = pool.begin().await?;
+    ensure_published_head(&mut tx, engine, clock()?).await?;
+    let last = last_observed_at(&mut tx, &engine.snapshot().program_id.0, source.as_str()).await?;
+    tx.commit().await?;
+    last.map(u64::try_from)
+        .transpose()
+        .map_err(StorageError::from)
+}
+
+async fn last_observed_at(
+    connection: &mut SqliteConnection,
+    program: &str,
+    collector: &str,
+) -> Result<Option<i64>, StorageError> {
+    Ok(sqlx::query_scalar(
+        "SELECT MAX(observed_at) FROM passive_runs WHERE program_id = ? AND collector = ?",
+    )
+    .bind(program)
+    .bind(collector)
+    .fetch_one(connection)
+    .await?)
+}
+
+async fn write_passive_run(
+    pool: &SqlitePool,
+    engine: &ScopeEngine,
+    input: PassiveRunInput<'_>,
+    live: Option<LiveRunProvenance<'_>>,
+    clock: impl Fn() -> Result<u64, StorageError>,
+) -> Result<PassiveRunResult, StorageError> {
     let snapshot = engine.snapshot();
     let validity = snapshot.valid_from..snapshot.expires_at;
-    if input.run_key.is_empty()
-        || input.run_key.len() > 128
-        || !input
-            .run_key
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || b"-_".contains(&byte))
-    {
-        return Err(StorageError::InvalidRunKey);
-    }
+    validate_run_key(input.run_key)?;
     if input.domains.len() > MAX_INVENTORY_DOMAINS {
         return Err(StorageError::InventoryLimit);
     }
@@ -63,35 +264,41 @@ pub async fn record_passive_run(
         .collect::<Result<_, _>>()?;
     let digest = engine.source_hash().to_hex();
     let observed_at_sql = i64::try_from(input.observed_at)?;
-    let run_id = stable_id(
-        "tool-run",
-        &[&snapshot.program_id.0, INVENTORY_COLLECTOR, input.run_key],
-    );
+    let source = live.map_or(PassiveSource::Fixture, |run| run.tool.source());
+    let collector = source.as_str();
+    let run_id = run_id(engine, collector, input.run_key);
     let completeness = match input.completeness {
         CollectionCompleteness::Complete => "complete",
         CollectionCompleteness::Partial => "partial",
     };
-    let input_hash = blake3::hash(&serde_json::to_vec(&(
+    let fixture_input = (
         digest.as_str(),
         input.observed_at,
         completeness,
         &canonical_domains,
-    ))?)
-    .to_hex();
+    );
+    let provenance = ToolProvenance::from_tool(live.map(|run| run.tool));
+    let input_bytes = match live {
+        Some(run) => serde_json::to_vec(&(
+            fixture_input,
+            run.started_at,
+            run.audit,
+            provenance.version,
+            provenance.sha256,
+        ))?,
+        None => serde_json::to_vec(&fixture_input)?,
+    };
+    let input_hash = blake3::hash(&input_bytes).to_hex();
 
     let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
     let now = clock()?;
-    if !validity.contains(&now) {
-        return Err(StorageError::InactiveScope);
-    }
-    if !validity.contains(&input.observed_at) || input.observed_at > now {
+    ensure_published_head(&mut tx, engine, now).await?;
+    let started_at = live.map_or(now, |run| run.started_at);
+    if !validity.contains(&input.observed_at) || input.observed_at > started_at || started_at > now
+    {
         return Err(StorageError::InvalidObservationTime);
     }
     let now_sql = i64::try_from(now)?;
-    let head = load_published_head(&mut tx, &snapshot.program_id.0).await?;
-    let head = head
-        .filter(|head| head.id == snapshot.id.0 && head.source_hash == digest.as_str())
-        .ok_or(StorageError::InactiveScope)?;
     if canonical_domains.iter().any(|domain| {
         !engine
             .evaluate(&snapshot.id, now, Action::Passive, domain)
@@ -121,13 +328,7 @@ pub async fn record_passive_run(
         });
     }
 
-    let last_observed_at: Option<i64> = sqlx::query_scalar(
-        "SELECT MAX(observed_at) FROM passive_runs WHERE program_id = ? AND collector = ?",
-    )
-    .bind(&snapshot.program_id.0)
-    .bind(INVENTORY_COLLECTOR)
-    .fetch_one(&mut *tx)
-    .await?;
+    let last_observed_at = last_observed_at(&mut tx, &snapshot.program_id.0, collector).await?;
     if last_observed_at.is_some_and(|last| observed_at_sql <= last) {
         return Err(StorageError::NonMonotonicRun);
     }
@@ -135,12 +336,28 @@ pub async fn record_passive_run(
     let write = InventoryWrite {
         engine,
         run_id: &run_id,
+        collector,
         observed_at: input.observed_at,
         observed_at_sql,
     };
+    let metadata = provenance.metadata(
+        completeness,
+        canonical_domains.len(),
+        live.map(|run| run.audit),
+    );
     write
-        .write_tool_run(&mut tx, now_sql, completeness, canonical_domains.len())
+        .write_tool_run(
+            &mut tx,
+            (i64::try_from(started_at)?, now_sql),
+            provenance,
+            &metadata,
+        )
         .await?;
+    if let Some(run) = live {
+        write
+            .write_candidate_audit(&mut tx, now_sql, run.audit)
+            .await?;
+    }
     let mut deltas = Vec::new();
     if let Some(event) = write.first_run_scope_change(&mut tx).await? {
         deltas.push(event);
@@ -162,8 +379,8 @@ pub async fn record_passive_run(
     )
     .bind(&run_id)
     .bind(&snapshot.program_id.0)
-    .bind(&head.id)
-    .bind(INVENTORY_COLLECTOR)
+    .bind(&snapshot.id.0)
+    .bind(collector)
     .bind(observed_at_sql)
     .bind(input_hash.as_str())
     .bind(completeness)
@@ -181,9 +398,60 @@ pub async fn record_passive_run(
     })
 }
 
+pub(crate) struct ToolProvenance<'a> {
+    pub(crate) version: &'a str,
+    pub(crate) sha256: &'a str,
+    pub(crate) sha256_subject: &'static str,
+}
+
+impl<'a> ToolProvenance<'a> {
+    pub(crate) fn from_tool(tool: Option<LiveTool<'a>>) -> Self {
+        match tool {
+            None => Self {
+                version: INVENTORY_VERSION,
+                sha256: INVENTORY_CONTRACT_SHA256,
+                sha256_subject: "built_in_inventory_contract",
+            },
+            Some(LiveTool::Crtsh) => Self {
+                version: "1",
+                sha256: CRTSH_CONTRACT_SHA256,
+                sha256_subject: "built_in_crtsh_contract",
+            },
+            Some(LiveTool::CrtshLoopback) => Self {
+                version: "1",
+                sha256: CRTSH_LOOPBACK_CONTRACT_SHA256,
+                sha256_subject: "built_in_crtsh_loopback_contract",
+            },
+            Some(LiveTool::Subfinder { version, sha256 }) => Self {
+                version,
+                sha256,
+                sha256_subject: "manifest_binary_pin",
+            },
+        }
+    }
+
+    fn metadata(
+        &self,
+        completeness: &str,
+        present_count: usize,
+        audit: Option<LiveRunAudit>,
+    ) -> String {
+        let mut metadata = serde_json::json!({
+            "completeness": completeness,
+            "present_count": present_count,
+            "sha256_subject": self.sha256_subject,
+        });
+        if let Some(audit) = audit {
+            metadata["audit"] = serde_json::json!(audit);
+        }
+        metadata.to_string()
+    }
+}
+
 struct InventoryWrite<'a> {
     engine: &'a ScopeEngine,
     run_id: &'a str,
+    collector: &'a str,
     observed_at: u64,
     observed_at_sql: i64,
 }
@@ -192,9 +460,9 @@ impl InventoryWrite<'_> {
     async fn write_tool_run(
         &self,
         connection: &mut SqliteConnection,
-        now_sql: i64,
-        completeness: &str,
-        present_count: usize,
+        times: (i64, i64),
+        provenance: ToolProvenance<'_>,
+        metadata: &str,
     ) -> Result<(), StorageError> {
         let snapshot_id = &self.engine.snapshot_id().0;
         let job_id = stable_id("inventory-job", &[self.run_id]);
@@ -205,7 +473,7 @@ impl InventoryWrite<'_> {
         )
         .bind(&decision_id)
         .bind(snapshot_id)
-        .bind(now_sql)
+        .bind(times.1)
         .execute(&mut *connection)
         .await?;
         sqlx::query(
@@ -217,28 +485,50 @@ impl InventoryWrite<'_> {
         .bind(&decision_id)
         .execute(&mut *connection)
         .await?;
-        let metadata = serde_json::json!({
-            "completeness": completeness,
-            "present_count": present_count,
-            "sha256_subject": "built_in_inventory_contract"
-        });
         sqlx::query(
             "INSERT INTO tool_runs (
                  id, job_id, tool, tool_version, tool_sha256, scope_snapshot_id,
                  policy_decision_id, started_at, finished_at, exit_metadata_json
-             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?8, ?8, ?9)",
+             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(self.run_id)
         .bind(&job_id)
-        .bind(INVENTORY_COLLECTOR)
-        .bind(INVENTORY_VERSION)
-        .bind(INVENTORY_CONTRACT_SHA256)
+        .bind(self.collector)
+        .bind(provenance.version)
+        .bind(provenance.sha256)
         .bind(snapshot_id)
         .bind(&decision_id)
-        .bind(now_sql)
-        .bind(metadata.to_string())
+        .bind(times.0)
+        .bind(times.1)
+        .bind(metadata)
         .execute(&mut *connection)
         .await?;
+        Ok(())
+    }
+
+    async fn write_candidate_audit(
+        &self,
+        connection: &mut SqliteConnection,
+        now: i64,
+        audit: LiveRunAudit,
+    ) -> Result<(), StorageError> {
+        for (decision, count) in [("DENY", audit.denied), ("UNKNOWN", audit.unknown)] {
+            if count == 0 {
+                continue;
+            }
+            let details = serde_json::json!({"count": count, "tool_run_id": self.run_id});
+            sqlx::query(
+                "INSERT INTO audit_events (id, scope_snapshot_id, occurred_at, event_type, decision, details_json)
+                 VALUES (?, ?, ?, 'passive_candidate_gate', ?, ?)",
+            )
+            .bind(stable_id("passive-candidate-gate", &[self.run_id, decision]))
+            .bind(&self.engine.snapshot_id().0)
+            .bind(now)
+            .bind(decision)
+            .bind(details.to_string())
+            .execute(&mut *connection)
+            .await?;
+        }
         Ok(())
     }
 
@@ -256,7 +546,7 @@ impl InventoryWrite<'_> {
         )
         .bind(publication_event_id(snapshot_id))
         .bind(&snapshot_id.0)
-        .bind(INVENTORY_COLLECTOR)
+        .bind(self.collector)
         .fetch_optional(connection)
         .await?;
         Ok(delta_json
@@ -286,7 +576,7 @@ impl InventoryWrite<'_> {
              ORDER BY observed_at DESC, id DESC LIMIT 1",
         )
         .bind(&asset_id)
-        .bind(INVENTORY_COLLECTOR)
+        .bind(self.collector)
         .fetch_optional(&mut *connection)
         .await?;
         sqlx::query(
@@ -348,7 +638,7 @@ impl InventoryWrite<'_> {
             )
             .bind(&snapshot.program_id.0)
             .bind(&cursor)
-            .bind(INVENTORY_COLLECTOR)
+            .bind(self.collector)
             .fetch_all(&mut *connection)
             .await?;
             let Some((last, _)) = page.last() else {
@@ -401,7 +691,7 @@ impl InventoryWrite<'_> {
         .bind(asset_id)
         .bind(&snapshot.id.0)
         .bind(self.observed_at_sql)
-        .bind(INVENTORY_COLLECTOR)
+        .bind(self.collector)
         .bind(status)
         .bind(exact_hash)
         .bind(self.run_id)
