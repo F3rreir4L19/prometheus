@@ -1,0 +1,12 @@
+version: 1
+snapshot:
+  id: lab-passive-v1
+  program_id: lab-inventory
+  source: manual_reviewed
+  valid_from: 0
+  expires_at: 4102444800
+  rules:
+    - { id: explicit-exclusion, effect: deny, kind: domain, target: payments.example.com, actions: [passive] }
+    - { id: lab-hosts, effect: allow, kind: wildcard, target: "*.example.com", actions: [passive] }
+    - { id: lab-network, effect: allow, kind: cidr, target: 192.0.2.0/25, actions: [http] }
+    - { id: lab-idna, effect: allow, kind: domain, target: münchen.example, actions: [passive] }

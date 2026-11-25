@@ -1,0 +1,7 @@
+# Replace these placeholders with the locally reviewed, patched executable and its digest.
+version: 1
+subfinder:
+  path: /opt/prometheus/bin/subfinder
+  version: 2.17.0-prometheus-passive.1
+  sha256: REPLACE-WITH-64-HEX-DIGITS
+  intrusiveness: passive

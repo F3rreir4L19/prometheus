@@ -1,6 +1,13 @@
-use domain::{AuditEvent, AuditEventId, Decision, ProgramId, ScopeSnapshotId};
-use sqlx::SqlitePool;
-use storage::{active_snapshot_id, append_audit, open_in_memory, open_local};
+use domain::{
+    AuditEvent, AuditEventId, CollectionCompleteness, Decision, DeltaKind, ProgramId,
+    ScopeSnapshotId,
+};
+use scope_engine::ScopeEngine;
+use sqlx::{migrate::Migrator, sqlite::SqliteConnectOptions, SqlitePool};
+use storage::{
+    active_snapshot_id, append_audit, open_in_memory, open_local, publish_reviewed_scope,
+    record_passive_run, PassiveRunInput,
+};
 
 async fn seed(pool: &SqlitePool) -> Result<(), sqlx::Error> {
     sqlx::raw_sql(
@@ -103,5 +110,76 @@ async fn file_database_uses_wal_and_safe_connection_settings() -> anyhow::Result
         .await?;
     assert_eq!(count, 1);
     reopened.close().await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn upgrade_keeps_m0_asset_identity_and_observations() -> anyhow::Result<()> {
+    let migrations = tempfile::tempdir()?;
+    std::fs::write(
+        migrations.path().join("0001_init.sql"),
+        include_str!("../migrations/0001_init.sql"),
+    )?;
+    let old_migrator = Migrator::new(migrations.path()).await?;
+    let directory = tempfile::tempdir()?;
+    let database = directory.path().join("m0.sqlite");
+    let m0_pool = SqlitePool::connect_with(
+        SqliteConnectOptions::new()
+            .filename(&database)
+            .create_if_missing(true)
+            .foreign_keys(true)
+            .pragma("recursive_triggers", "ON"),
+    )
+    .await?;
+    old_migrator.run(&m0_pool).await?;
+    seed(&m0_pool).await?;
+    m0_pool.close().await;
+
+    let upgraded = open_local(&database).await?;
+    let engine = ScopeEngine::from_yaml(
+        br"version: 1
+snapshot:
+  id: s3
+  program_id: p
+  source: manual_reviewed
+  valid_from: 0
+  expires_at: 100
+  supersedes_id: s1
+  rules:
+    - { id: local, effect: allow, kind: domain, target: lab.example, actions: [passive] }
+",
+    )?;
+    publish_reviewed_scope(&upgraded, &engine, || Ok(2)).await?;
+    let result = record_passive_run(
+        &upgraded,
+        &engine,
+        PassiveRunInput {
+            run_key: "post-upgrade",
+            observed_at: 3,
+            completeness: CollectionCompleteness::Complete,
+            domains: &["lab.example".to_owned()],
+        },
+        || Ok(3),
+    )
+    .await?;
+    assert_eq!(result.deltas.len(), 1);
+    assert_eq!(result.deltas[0].kind, DeltaKind::ScopeChanged);
+    let asset: (String, i64, i64) =
+        sqlx::query_as("SELECT id, first_seen_at, last_seen_at FROM assets")
+            .fetch_one(&upgraded)
+            .await?;
+    assert_eq!(asset, ("a1".to_owned(), 1, 3));
+    let observations: Vec<(i64, String, Option<String>)> = sqlx::query_as(
+        "SELECT observed_at, scope_snapshot_id, tool_run_id FROM observations ORDER BY observed_at",
+    )
+    .fetch_all(&upgraded)
+    .await?;
+    assert_eq!(
+        observations,
+        [
+            (1, "s1".to_owned(), None),
+            (3, "s3".to_owned(), Some(result.run_id.0)),
+        ]
+    );
     Ok(())
 }

@@ -1,0 +1,6 @@
+# Inventário local sintético
+API.Example.COM.
+api.example.com
+münchen.example
+payments.example.com
+example.com

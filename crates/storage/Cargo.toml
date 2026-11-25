@@ -8,9 +8,14 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
+blake3.workspace = true
 domain.workspace = true
+scope-engine.workspace = true
+serde.workspace = true
+serde_json.workspace = true
 sqlx.workspace = true
 thiserror.workspace = true
+tokio = { workspace = true, features = ["time"] }
 
 [dev-dependencies]
 anyhow.workspace = true

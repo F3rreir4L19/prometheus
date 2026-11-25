@@ -1,0 +1,16 @@
+version: 1
+snapshot:
+  id: lab-passive-live-v1
+  program_id: lab-live-inventory
+  source: manual_reviewed
+  valid_from: 0
+  expires_at: 4102444800
+  passive_live:
+    program_per_minute: 60
+    action_per_minute: 60
+    host_per_minute: 60
+    provider_per_minute: 60
+  rules:
+    - { id: lab-root, effect: allow, kind: domain, target: inventory.example.test, actions: [passive] }
+    - { id: lab-hosts, effect: allow, kind: wildcard, target: "*.inventory.example.test", actions: [passive] }
+    - { id: lab-exclusion, effect: deny, kind: domain, target: denied.inventory.example.test, actions: [passive] }

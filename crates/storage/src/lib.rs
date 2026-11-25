@@ -1,6 +1,23 @@
 //! SQLite metadata and append-only audit. Database files must be on a local filesystem.
 
-use std::{path::Path, time::Duration};
+mod passive;
+mod passive_admission;
+mod publication;
+
+pub use passive::{
+    last_collector_observed_at, record_collector_run, record_passive_run, replay_collector_run,
+    LiveRunAudit, LiveRunProvenance, LiveRunReplay, LiveTool, PassiveRunInput, PassiveRunResult,
+    MAX_INVENTORY_DOMAINS,
+};
+pub use passive_admission::{
+    admit_passive_collection, defer_passive_provider, finish_passive_dispatch, PassiveRateTime,
+};
+pub use publication::publish_reviewed_scope;
+
+use std::{
+    path::Path,
+    time::{Duration, SystemTime, UNIX_EPOCH},
+};
 
 use domain::{AuditEvent, Decision, ProgramId, ScopeSnapshotId};
 use sqlx::{
@@ -20,8 +37,62 @@ pub enum StorageError {
     Migration(#[from] sqlx::migrate::MigrateError),
     #[error("timestamp outside SQLite integer range")]
     InvalidTime(#[from] std::num::TryFromIntError),
+    #[error("clock is outside the supported Unix range")]
+    Clock(#[from] std::time::SystemTimeError),
     #[error("file-backed SQLite requires WAL mode")]
     WalUnavailable,
+    #[error("scope revision is inactive or does not match the published document")]
+    InactiveScope,
+    #[error("scope revision does not supersede the current head")]
+    RevisionConflict,
+    #[error("scope revision ID already has different contents")]
+    RevisionCollision,
+    #[error("invalid passive inventory timestamp")]
+    InvalidObservationTime,
+    #[error("passive inventory run key is invalid")]
+    InvalidRunKey,
+    #[error("passive inventory run key already has different contents")]
+    RunCollision,
+    #[error("passive inventory timestamps must increase for each program and collector")]
+    NonMonotonicRun,
+    #[error("passive inventory contains a malformed or unauthorized domain")]
+    UnauthorizedDomain,
+    #[error("passive inventory exceeds the domain limit")]
+    InventoryLimit,
+    #[error("passive inventory exceeds the per-run delta limit")]
+    DeltaLimit,
+    #[error("passive provider admission is rate limited")]
+    PassiveRateLimited,
+    #[error("invalid live collector provenance")]
+    InvalidCollector,
+    #[error("could not encode or decode storage metadata")]
+    Metadata,
+}
+
+impl From<serde_json::Error> for StorageError {
+    fn from(_: serde_json::Error) -> Self {
+        Self::Metadata
+    }
+}
+
+pub fn unix_time_seconds() -> Result<u64, StorageError> {
+    Ok(SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs())
+}
+
+pub fn unix_time_millis() -> Result<u64, StorageError> {
+    Ok(u64::try_from(
+        SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis(),
+    )?)
+}
+
+fn stable_id(label: &str, fields: &[&str]) -> String {
+    let mut hash = blake3::Hasher::new();
+    hash.update(b"prometheus-storage-v1\0");
+    for field in std::iter::once(&label).chain(fields) {
+        hash.update(&(field.len() as u64).to_le_bytes());
+        hash.update(field.as_bytes());
+    }
+    hash.finalize().to_hex().to_string()
 }
 
 pub async fn open_local(path: &Path) -> Result<SqlitePool, StorageError> {

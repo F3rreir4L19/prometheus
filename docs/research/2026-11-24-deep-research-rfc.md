@@ -2,8 +2,8 @@
 
 ## Escopo, premissas e estado da arte
 
-**Status:** proposta de arquitetura.  
-**Data de consulta das fontes:** 24 de novembro de 2026.  
+**Status:** proposta de arquitetura.
+**Data de consulta das fontes:** 24 de novembro de 2026.
 **Objetivo:** construir um sistema contínuo de Attack Surface Management e reconnaissance que opere exclusivamente dentro das regras de programas autorizados de Bug Bounty, com execução ativa limitada por política determinística e ações sensíveis sujeitas a aprovação humana.
 
 A arquitetura aqui proposta parte de quatro influências diferentes que não devem ser confundidas. A Trickest documenta um modelo de workflows em grafo, com módulos reutilizáveis, runtime, resultados e histórico de execução integrados; seu catálogo atual continua contendo workflows e módulos voltados a recon/ASM, inclusive integrações com ferramentas como `subfinder` e `httpx`. citeturn371104search27turn371104search28turn371104search23turn371104search26 O ecossistema ProjectDiscovery segue uma filosofia complementar: ferramentas especializadas que aceitam streams/listas e produzem saídas consumíveis por outros estágios — `subfinder → dnsx → httpx → katana/nuclei` é um padrão explicitamente suportado pela documentação, que também ressalta que os ativos devem estar autorizados para teste. citeturn230178search5turn230178search0turn230178search1turn230178search2
